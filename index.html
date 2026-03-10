@@ -9,31 +9,32 @@
 <body style="display: flex; justify-content: center; align-items: center; height: 100vh; font-family: sans-serif; background-color: #fdfaf7; color: #8c7355; margin: 0;">
     <div style="text-align: center;">
         <p style="font-size: 18px; letter-spacing: 2px;">榮枯有時 Fade & Blossom</p>
-        <p id="status" style="font-size: 14px; color: #bca08d;">身分驗證中...</p>
+        <p id="status" style="font-size: 14px; color: #bca08d;">系統讀取中...</p>
     </div>
 
     <script>
         async function main() {
             try {
-                // 1. 初始化 LIFF，不使用自動跳轉
                 await liff.init({ liffId: "2009304285-bqxMPnTE" });
 
                 if (!liff.isLoggedIn()) {
-                    // 如果沒登入，就在目前頁面登入
-                    liff.login();
+                    // 關鍵修正：強迫 LINE 登入後回到 GitHub 本身，而不是跳去 Tally
+                    liff.login({ redirectUri: window.location.href });
                 } else {
-                    document.getElementById('status').innerText = "跳轉中...";
-                    // 2. 取得 User ID
+                    document.getElementById('status').innerText = "驗證成功，跳轉中...";
                     const profile = await liff.getProfile();
                     const userId = profile.userId;
 
-                    // 3. 關鍵：用 replace 強迫跳轉到「有帶 ID」的 Tally 網址
-                    // 這樣就不會被 LINE 原本空的 redirectUri 干擾
-                    const finalUrl = "https://tally.so/r/81dyyO?userId=" + userId;
-                    window.location.replace(finalUrl);
+                    // 抓到 ID 後，手動組合成 Tally 網址
+                    const destination = "https://tally.so/r/81dyyO?userId=" + userId;
+                    
+                    // 使用 replace 確保瀏覽器不會留存中間頁面的紀錄
+                    window.location.replace(destination);
                 }
             } catch (err) {
                 console.error(err);
+                // 發生錯誤時的保險機制
+                document.getElementById('status').innerText = "跳轉失敗，嘗試直接開啟...";
                 window.location.replace("https://tally.so/r/81dyyO");
             }
         }
