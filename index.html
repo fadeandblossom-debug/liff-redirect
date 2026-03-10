@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>榮枯有時預約系統</title>
+    <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+</head>
+<body style="display: flex; justify-content: center; align-items: center; height: 100vh; font-family: sans-serif; background-color: #fdfaf7; color: #8c7355; margin: 0;">
+    <div style="text-align: center;">
+        <p style="font-size: 18px; letter-spacing: 2px;">榮枯有時 Fade & Blossom</p>
+        <p style="font-size: 14px; color: #bca08d;">預約系統跳轉中...</p>
+    </div>
+
+    <script>
+        async function main() {
+            try {
+                // 初始化 LIFF (已填入你的 ID)
+                await liff.init({ liffId: "2009304285-bqxMPnTE" });
+
+                if (!liff.isLoggedIn()) {
+                    liff.login();
+                } else {
+                    const profile = await liff.getProfile();
+                    const userId = profile.userId;
+
+                    // 跳轉到 Tally 並帶上正確的 userId
+                    window.location.href = "https://tally.so/r/81dyyO?userId=" + userId;
+                }
+            } catch (err) {
+                console.error(err);
+                // 失敗時的保險機制：直接跳轉原表單
+                window.location.href = "https://tally.so/r/81dyyO";
+            }
+        }
+        main();
+    </script>
+</body>
+</html>
