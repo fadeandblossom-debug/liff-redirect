@@ -15,22 +15,24 @@
     <script>
         async function main() {
             try {
-                // 初始化 LIFF (已填入你的 ID)
+                // 1. 初始化 LIFF
                 await liff.init({ liffId: "2009304285-bqxMPnTE" });
 
                 if (!liff.isLoggedIn()) {
                     liff.login();
                 } else {
+                    // 2. 取得 User ID
                     const profile = await liff.getProfile();
                     const userId = profile.userId;
 
-                    // 跳轉到 Tally 並帶上正確的 userId
-                    window.location.href = "https://tally.so/r/81dyyO?userId=" + userId;
+                    // 3. 關鍵跳轉：確保 ID 有接在問號後面
+                    const finalUrl = "https://tally.so/r/81dyyO?userId=" + userId;
+                    window.location.replace(finalUrl);
                 }
             } catch (err) {
                 console.error(err);
-                // 失敗時的保險機制：直接跳轉原表單
-                window.location.href = "https://tally.so/r/81dyyO";
+                // 保險機制
+                window.location.replace("https://tally.so/r/81dyyO");
             }
         }
         main();
