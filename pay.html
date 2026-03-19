@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>前往付款頁面...</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background: #faf9f7;
+      color: #555;
+    }
+    p { font-size: 16px; }
+  </style>
+</head>
+<body>
+  <p>正在前往付款頁面，請稍候…</p>
+  <form id="ecpayForm" method="POST"
+        action="https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5">
+  </form>
+  <script>
+    (function () {
+      const params = new URLSearchParams(window.location.search);
+      const form = document.getElementById('ecpayForm');
+      params.forEach(function (value, key) {
+        const input = document.createElement('input');
+        input.type  = 'hidden';
+        input.name  = key;
+        input.value = value;
+        form.appendChild(input);
+      });
+      form.submit();
+    })();
+  </script>
+</body>
+</html>
