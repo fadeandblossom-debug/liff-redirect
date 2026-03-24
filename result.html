@@ -168,7 +168,7 @@
     btn.disabled = true;
     btn.textContent = '產生付款連結中…';
 
-    fetch(GAS_URL + '?sid=' + encodeURIComponent(sid), { redirect: 'follow' })
+    fetch('/retry?sid=' + encodeURIComponent(sid))
       .then(function(res) { return res.json(); })
       .then(function(data) {
         if (data && data.payUrl) {
