@@ -9,7 +9,7 @@ export async function onRequest(context) {
     });
   }
 
-  const GAS_URL = 'https://script.google.com/macros/s/AKfycbzNvAeEywVCgVGieJFZqgdutS_l4pjbNH4K9CIF8zgtybCapUexWCb9R3PLAM2qFCldnA/exec';
+  const GAS_URL = 'https://script.google.com/macros/s/AKfycbwFe32VAT3TWrhZNhEZaQsJXxE5hv4BqeMFKAtlqY1YXB3vu05xH5j69-xUkMVp8juBhw/exec';
 
   const gasResponse = await fetch(GAS_URL + '?sid=' + encodeURIComponent(sid));
   const text = await gasResponse.text();
