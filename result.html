@@ -168,7 +168,7 @@
     btn.disabled = true;
     btn.textContent = '產生付款連結中…';
 
-    fetch('/retry?sid=' + encodeURIComponent(sid))
+    fetch('https://script.google.com/macros/s/AKfycbzNvAeEywVCgVGieJFZqgdutS_l4pjbNH4K9CIF8zgtybCapUexWCb9R3PLAM2qFCldnA/exec?sid=' + encodeURIComponent(sid))
       .then(function(res) { return res.json(); })
       .then(function(data) {
         if (data && data.payUrl) {
