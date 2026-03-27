@@ -166,30 +166,11 @@
 
   function retryPayment() {
     btn.disabled = true;
-    btn.textContent = '產生付款連結中…';
+    btn.textContent = '正在處理中…';
+    errEl.textContent = '';
 
-    fetch('/retry?sid=' + encodeURIComponent(sid))
-      .then(function(res) { return res.json(); })
-      .then(function(data) {
-        if (data && data.payUrl) {
-          window.location.href = data.payUrl;
-        } else {
-          resetBtn();
-          errEl.textContent = '產生連結失敗，請聯繫我們';
-          errEl.style.color = '#e3836c';
-        }
-      })
-      .catch(function(err) {
-        console.error(err);
-        resetBtn();
-        errEl.textContent = '網路錯誤，請稍後再試';
-        errEl.style.color = '#e3836c';
-      });
-  }
-
-  function resetBtn() {
-    btn.disabled = false;
-    btn.innerHTML = '重新付款 <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>';
+    var GAS_URL = 'https://script.google.com/macros/s/AKfycbwFe32VAT3TWrhZNhEZaQsJXxE5hv4BqeMFKAtlqY1YXB3vu05xH5j69-xUkMVp8juBhw/exec';
+    window.location.href = GAS_URL + '?sid=' + encodeURIComponent(sid);
   }
 </script>
 </body>
