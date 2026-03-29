@@ -25,9 +25,11 @@
   </form>
   <script>
     (function () {
+      const EXCLUDE = ['orderId', 'sid'];
       const params = new URLSearchParams(window.location.search);
       const form = document.getElementById('ecpayForm');
       params.forEach(function (value, key) {
+        if (EXCLUDE.indexOf(key) !== -1) return;
         const input = document.createElement('input');
         input.type  = 'hidden';
         input.name  = key;
