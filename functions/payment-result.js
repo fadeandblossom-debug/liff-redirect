@@ -5,9 +5,9 @@ export async function onRequestPost(context) {
   const rtnCode  = formData.get('RtnCode')       || '';
   const rtnMsg   = formData.get('RtnMsg')        || '';
 
-  // 付款成功 → 不跳轉，讓綠界顯示自己的成功頁面
+  // 付款成功 → 跳轉到成功頁
   if (rtnCode === '1') {
-    return new Response('', { status: 200 });
+    return Response.redirect('https://liff-redirect.pages.dev/success.html', 302);
   }
 
   // 付款失敗 → 跳轉到 result.html
