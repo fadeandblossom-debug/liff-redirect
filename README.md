@@ -1,6 +1,6 @@
 # 榮枯有時 Fade & Blossom — LINE 預約自動化系統技術文件
 
-> 最後更新：2026-03-31
+> 最後更新：2026-05-08
 > GAS 專案名稱：LINE 預約串接
 > GAS 綁定方式：容器綁定（花藝訂單記錄表）
 
@@ -40,8 +40,8 @@
 | Stage | 名稱 | 觸發方式 | 說明 |
 |-------|------|----------|------|
 | Stage 1 | 新單自動歡迎 | 時間觸發（每分鐘） | 新訂單自動發送 LINE 歡迎訊息 |
-| Stage 2 | 發送訂單確認 | 手動填「發送」觸發 | 發送訂單明細給客戶確認 |
-| Stage 3 | 發送付款連結 | 手動填「發送」觸發 | 產生綠界付款連結並發送 LINE |
+| Stage 2 | 發送訂單確認 | 手動填「發送」觸發 | 發送訂單明細給客戶確認（含配送運費顯示） |
+| Stage 3 | 發送付款連結 | 手動填「發送」觸發 | 產生短網址付款連結並發送 LINE |
 | Stage 4 | 付款結果通知 | 綠界 POST 回傳 | 付款成功發 LINE 通知，失敗更新狀態 |
 | Stage 4+ | 重新付款 | 客戶從失敗頁點擊 | 重新產生付款連結並跳轉 |
 | Stage 5 | Google Calendar 整合 | 付款成功自動觸發 / Sheet 編輯 | 建立/更新/管理行事曆活動 |
@@ -63,16 +63,18 @@ Tally 原生整合推播至 Google Sheet「花禮預訂單」
     ↓
 Google Apps Script（容器綁定於花藝訂單記錄表）
     ├── Stage1：時間觸發（每分鐘）→ LINE 歡迎訊息
-    ├── Stage2：onEditTrigger → LINE 訂單確認
-    ├── Stage3：onEditTrigger → 產生付款連結 → LINE
-    ├── Stage4 doPost：接收綠界付款結果 → LINE 通知 → 建立 Calendar 活動
-    ├── Stage4 doGet：重新產生付款連結 → 跳轉頁面
+    ├── Stage2：onEditTrigger → LINE 訂單確認（含配送運費）
+    ├── Stage3：onEditTrigger → 產生短網址付款連結 → LINE
+    ├── Stage4 doPost：接收綠界付款結果（用 CustomField1 查找訂單）→ LINE 通知 → 建立 Calendar 活動
+    ├── Stage4 doGet：重新產生付款連結（API mode 回傳 JSON）
     └── Stage5：onEditTrigger → 更新/刪除/重建 Calendar 活動
          ↓
 Cloudflare Pages（liff-redirect.pages.dev）
-    ├── pay.html：接收參數，POST 給綠界
-    ├── result.html：付款失敗頁面，含重新付款按鈕
-    └── functions/payment-result.js：接收綠界 POST，轉址到 result.html
+    ├── pay.html：向 /api/get-pay-params 取得新單號與參數，自動 POST 給綠界
+    ├── result.html：付款失敗/首次付款入口頁，含「前往付款」/「重新付款」按鈕
+    ├── functions/api/get-pay-params.js：產生新 MerchantTradeNo、計算 CheckMacValue
+    ├── functions/payment-result.js：接收綠界 POST，轉址到 result.html 或 success.html
+    └── functions/test-gas.js：測試用（可保留或刪除）
          ↓
 綠界 ECPay 正式金流
     └── payment.ecpay.com.tw/Cashier/AioCheckOut/V5
@@ -96,238 +98,6 @@ LIFF 連結（`https://liff.line.me/xxx`）是整個系統的**入口**。它並
 4. 建立後取得 LIFF URL，格式為 `https://liff.line.me/200xxxxxxx-xxxxxxxx`
 5. 將這個 LIFF URL 放進 LINE 的訊息或選單中，作為客戶的訂購入口
 
-### index.html（LIFF 跳轉頁）
-
-位於 GitHub repo 根目錄，部署在 `https://liff-redirect.pages.dev/`。
-
-唯一任務：取得客戶的 LINE `userId` 後，帶入 Tally 表單連結並跳轉。
-
-```html
-<!DOCTYPE html>
-<html lang="zh-TW">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>載入中...</title>
-</head>
-<body>
-  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
-  <script>
-    async function main() {
-      await liff.init({ liffId: "你的LIFF_ID" });
-      if (!liff.isLoggedIn()) {
-        liff.login();
-      } else {
-        const profile = await liff.getProfile();
-        const userId = profile.userId;
-        const tallyUrl = `https://tally.so/r/你的表單ID?userId=${userId}`;
-        window.location.href = tallyUrl;
-      }
-    }
-    main();
-  </script>
-</body>
-</html>
-```
-
-> ⚠️ **更換 Tally 表單時**：只需修改 `index.html` 中的 `tallyUrl` 變數即可。原本發送給客戶的 LIFF URL（`https://liff.line.me/xxx`）完全不需要變動。
-
-### userId 寫入機制
-
-> ⚠️ **重要**：系統不具備 Google 帳號與 LINE 帳號的連動能力，所有 LINE 推播完全依賴表單提交時寫入的 `userId` 字串。若該欄位為空，Stage 1、2、3 的所有自動化推播皆會失效。
-
-**完整流程：**
-
-1. 客戶點擊 LINE 內的 LIFF URL
-2. LIFF 頁面（`index.html`）呼叫 `liff.getProfile()` 取得 `userId`
-3. 跳轉至 Tally 表單，URL 帶入 `?userId=U50ca69780f65ec1`
-4. Tally 表單內的**隱藏欄位（Hidden Field）**名稱為 `userId`，自動抓取 URL 參數值
-5. 客戶提交後，Tally 原生整合將所有欄位推播至 Google Sheet D 欄
-
-### Tally 表單設定重點
-
-- 加入 **Hidden Field**，欄位名稱設為 `userId`（大小寫敏感）
-- Hidden Field 值來源：URL 參數，參數名稱 `userId`
-- Tally 整合：連接「花藝訂單記錄表」→「花禮預訂單」工作表
-- 確認 `userId` 對應到 Sheet D 欄
-
----
-
-## 🛠️ SOP：更換 Tally 表單流程
-
-需要發布新活動或更換訂購表單時，依照以下三個階段操作：
-
-### 第一階段：Tally 表單端
-
-1. 在 Tally 建立新表單
-2. 加入 **Hidden Field**，名稱為 `userId`，來源為 URL 參數 `userId`
-3. 點擊 `Publish`，取得新的表單 ID（如 `nNEW_ID`）
-4. 在 Tally `Integrations` 重新連接 Google Sheet
-
-### 第二階段：更新 index.html
-
-1. 開啟 GitHub repo `fadeandblossom-debug/liff-redirect`
-2. 修改 `index.html` 中的 `tallyUrl`：
-   ```javascript
-   const tallyUrl = `https://tally.so/r/nNEW_ID?userId=${userId}`;
-   ```
-3. 推送到 `main` branch，Cloudflare 自動部署
-
-> LIFF URL（`https://liff.line.me/xxx`）**不需要變動**。
-
-### 第三階段：GAS 確認
-
-- 如新表單寫入新工作表，修改 `Config.gs` 的 `SHEET_NAME`
-- 確認新工作表標題列包含：`userId`、`訂購人姓名`、`配送方式`、`付款金額` 等關鍵欄位（欄位順序不影響程式，字眼需正確）
-
-### 上線前測試清單
-
-- [ ] 手機點擊 LIFF 連結，確認正確跳轉至新表單
-- [ ] 表單網址末端出現 `?userId=U12345...`
-- [ ] 提交測試單後，Sheet D 欄有正確寫入 userId
-- [ ] 提交後約 1 分鐘內收到 Stage 1 歡迎訊息
-- [ ] 手動填「發送」後收到 Stage 2 訂單確認明細
-- [ ] 手動填「發送」後收到 Stage 3 付款連結，連結可正常進入綠界付款頁
-
----
-
-## LINE 後台設定
-
-### LINE Developers Console
-
-1. 登入 [LINE Developers Console](https://developers.line.biz)
-2. 選擇對應的 Provider 和 Messaging API Channel
-
-### Messaging API Channel 設定
-
-| 設定項目 | 值 |
-|---------|------|
-| Channel ID | `2009304285` |
-| Webhook URL | `https://script.google.com/macros/s/AKfycbzMwwQ3GU2rq1fZ5zPo1AHvgKGJQdGRByQ_XiS0IbzQPPCqxqFvamIRCahS8I8uSecz/exec` |
-| Use webhook | 開啟（ON） |
-| Auto-reply messages | 關閉（由 GAS 控制回應） |
-
-### LIFF 設定
-
-| 設定項目 | 說明 |
-|---------|------|
-| Endpoint URL | Tally 表單 URL（不含 userId，由 LIFF JS 動態附加） |
-| Scope | `profile`（需要讀取 userId） |
-
-### Access Token 取得
-
-1. 進入 Messaging API Channel
-2. 找到 **Channel Access Token** 區塊
-3. 點「Issue」產生長期 token
-4. 複製後存入 GAS Script Properties，Key 為 `LINE_TOKEN`
-
-> ⚠️ Token 若重新產生，舊 token 立即失效，必須立刻更新 Script Properties，否則所有 LINE 推播會失敗。
-
----
-
-## 環境設定
-
-### GAS 專案位置
-
-- **Google Sheet 名稱**：花藝訂單記錄表
-- **開啟方式**：花藝訂單記錄表 → 擴充功能 → Apps Script
-- **GAS 專案名稱**：LINE 預約串接
-- **綁定方式**：容器綁定（非 Standalone）
-
-### GAS Script Properties（指令碼屬性）
-
-進入 GAS 專案 → 左側齒輪「專案設定」→「指令碼屬性」：
-
-| Key | 說明 |
-|-----|------|
-| `ECPAY_ID` | 綠界商店代號（正式環境：`3492283`） |
-| `ECPAY_KEY` | 綠界 HashKey |
-| `ECPAY_IV` | 綠界 HashIV |
-| `LINE_TOKEN` | LINE Messaging API Channel Access Token |
-
-> ⚠️ 絕對不要把金鑰直接寫在程式碼裡。
-
-### GAS 觸發條件設定
-
-進入 GAS 專案 → 左側時鐘圖示「觸發條件」，需手動建立以下兩個觸發器：
-
-| 函式名稱 | 類型 | 設定 |
-|---------|------|------|
-| `autoWelcomeTrigger` | 時間驅動 | 分鐘計時器，每 1 分鐘 |
-| `onEditTrigger` | 試算表，編輯時 | — |
-
-> ⚠️ 這兩個觸發器不會自動建立，專案初始化時必須手動新增。
-
-### GAS 部署設定
-
-- **執行身分**：我（GAS 專案擁有者）
-- **誰可以存取**：所有人
-- **穩定部署 URL**：
-  ```
-  https://script.google.com/macros/s/AKfycbzb-IRbn6OoJJDHsv8lREJjZxC9ASfSJnIqjY_bK6pKKXc7kZcmnt1Ke4kD1T7p85GfoQ/exec
-  ```
-
-> ⚠️ 每次修改程式碼後必須「管理部署 → 編輯現有部署 → 新版本 → 部署」。絕對不要新增新部署，否則 URL 改變後需同步更新三個地方：`EcPayUtils.gs` 的 `ReturnURL`、`result.html` 的 `GAS_URL`、綠界後台的 `ReturnURL`。
-
-### GAS OAuth 授權（重要）
-
-Stage 5 新增了 Google Calendar 存取，需要在 `appsscript.json` 宣告 Calendar scope，並手動完成一次授權：
-
-**`appsscript.json` 需包含：**
-```json
-{
-  "timeZone": "Asia/Taipei",
-  "dependencies": {},
-  "exceptionLogging": "STACKDRIVER",
-  "runtimeVersion": "V8",
-  "webapp": {
-    "executeAs": "USER_DEPLOYING",
-    "access": "ANYONE_ANONYMOUS"
-  },
-  "oauthScopes": [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/script.external_request",
-    "https://www.googleapis.com/auth/calendar"
-  ]
-}
-```
-
-**首次授權步驟：**
-1. 在 `Stage5_Calendar.gs` 新增並執行 `authorizeCalendar()` 函式
-2. 跳出「需要授權」視窗後點「審查權限」→「允許」
-3. 授權完成後 Calendar 功能即可正常運作
-
-> ⚠️ GAS Web App 執行時不會自動觸發授權視窗，必須在 GAS 編輯器手動執行一次含有 `CalendarApp` 的函式才能完成授權。
-
-### 綠界後台設定
-
-登入 [綠界後台](https://vendor.ecpay.com.tw)：
-
-| 設定項目 | 值 |
-|---------|-----|
-| 幕後回傳程式（ReturnURL） | GAS 部署 URL |
-| 失敗頁面（全網址） | 留空（由程式碼動態帶入 `OrderResultURL`） |
-| 成交頁面（全網址） | 留空（使用綠界預設頁面）|
-
-> ⚠️ 綠界後台的「失敗頁面」欄位必須留空，否則會蓋掉 `EcPayUtils.gs` 程式碼動態設定的 `OrderResultURL`。
-
-### Cloudflare Pages
-
-- **GitHub repo**：`fadeandblossom-debug/liff-redirect`
-- **網域**：`https://liff-redirect.pages.dev`
-- **部署方式**：推送到 `main` branch 自動觸發
-
-**GitHub repo 檔案清單：**
-
-| 檔案 | 說明 |
-|------|------|
-| `index.html` | LIFF 跳轉頁，取得 userId 後跳轉到 Tally 表單 |
-| `pay.html` | 橋接頁，接收 GAS 參數後 POST 給綠界 |
-| `result.html` | 付款失敗頁面，含重新付款按鈕 |
-| `success.html` | 付款成功頁面 |
-| `functions/payment-result.js` | 接收綠界 POST，判斷成功/失敗，分別轉址到 success.html 或 result.html |
-| `functions/retry.js` | 舊版 Cloudflare Function（已棄用，保留備查） |
-
 ---
 
 ## GAS 檔案說明與完整程式碼
@@ -336,82 +106,30 @@ Stage 5 新增了 Google Calendar 存取，需要在 `appsscript.json` 宣告 Ca
 
 ```javascript
 const CONFIG = {
-  LINE_ACCESS_TOKEN:    PropertiesService.getScriptProperties().getProperty('LINE_TOKEN'),
-  SHEET_NAME:           '花禮預訂單',
-  TRIGGER_COL_NAME:     '是否發送訂單確認',
-  TRIGGER_VALUE:        '發送',
-  PAY_LINK_COL_NAME:    '付款連結',
-  STATUS_COL_NAME:      '狀態',
+  SHEET_NAME:         '花禮預訂單',
+  TRIGGER_COL_NAME:   '是否發送訂單確認',
+  TRIGGER_VALUE:      '發送',
   PAY_TRIGGER_COL_NAME: '發送付款連結',
-  PAY_TRIGGER_VALUE:    '發送'
+  PAY_TRIGGER_VALUE:  '發送',
+  STATUS_COL_NAME:    '狀態',
+  PAY_LINK_COL_NAME:  '付款連結',
 };
-```
-
-### LineUtils.gs
-
-```javascript
-function sendLinePush(userId, message) {
-  const url = 'https://api.line.me/v2/bot/message/push';
-  const payload = {
-    to: userId,
-    messages: [{ type: 'text', text: message }]
-  };
-  const options = {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { 'Authorization': 'Bearer ' + CONFIG.LINE_ACCESS_TOKEN },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
-  const response = UrlFetchApp.fetch(url, options);
-  console.log('LINE Push 回應：' + response.getContentText());
-}
-```
-
-### Stage1_Notify.gs
-
-**觸發方式**：時間觸發（每 1 分鐘）
-
-```javascript
-function autoWelcomeTrigger() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_NAME);
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
-    .map(h => h.toString().replace(/[\s\r\n]+/g, ''));
-  const allData = sheet.getDataRange().getValues();
-
-  const userIdIdx = headers.indexOf('userId');
-  const stIdx = headers.indexOf(CONFIG.STATUS_COL_NAME.replace(/[\s\r\n]+/g, ''));
-
-  for (let i = 1; i < allData.length; i++) {
-    const row = allData[i];
-    const userId = row[userIdIdx] ? row[userIdIdx].toString().trim() : '';
-    const status = row[stIdx] ? row[stIdx].toString().trim() : '';
-
-    if (!userId || status) continue;
-
-    const customerName = row[headers.indexOf('訂購人姓名')] || '您';
-    const welcomeMsg = customerName + ' 您好 🌿\n'
-      + '感謝您填寫榮枯有時的花禮預訂單！\n'
-      + '我們已收到您的訂單，花藝師將於確認細節後與您聯繫。\n'
-      + '\n'
-      + '如有任何問題歡迎隨時與我們聯繫 🤍';
-
-    sendLinePush(userId, welcomeMsg);
-    sheet.getRange(i + 1, stIdx + 1).setValue('1-已受理新單');
-    console.log('Stage1 發送歡迎訊息：' + customerName);
-  }
-}
 ```
 
 ### Stage2_OrderConfirm.gs
 
 **觸發方式**：`onEditTrigger`（安裝型 on-edit 觸發）
 
+> ✅ 2026-05-08 更新：選擇配送時，LINE 訊息新增顯示「配送運費：NT$ xxx」欄位。
+
 ```javascript
+// =============================================
+// Stage2_OrderConfirm.gs
+// =============================================
+
 function onEditTrigger(e) {
   if (!e || !e.range) return;
   console.log('onEditTrigger 觸發：' + e.range.getSheet().getName() + ' 第 ' + e.range.getRow() + ' 列 第 ' + e.range.getColumn() + ' 欄');
-
   const range = e.range;
   const sheet = range.getSheet();
   if (sheet.getName() !== CONFIG.SHEET_NAME) return;
@@ -538,6 +256,7 @@ function processOrderConfirmation(sheet, row, headers) {
     + '▪️ 花禮金額：NT$ ' + itemTotal + '\n'
     + '▪️ 加購卡片：' + (order['卡片類型'] || '無') + ' (NT$ ' + cardTotal + ' / ' + (order['加購卡片數量'] || 0) + '張)\n'
     + '▪️ 加購金額：NT$ ' + cardTotal + '\n'
+    + (isShipping ? '▪️ 配送運費：NT$ ' + shippingFee + '\n' : '')  // ✅ 選擇配送才顯示運費
     + '▪️ 應付總額：NT$ ' + totalAmount + '\n'
     + '▪️ 訂單備註：' + (order['訂單備註'] || '無') + '\n'
     + shippingInfo + '\n\n'
@@ -562,44 +281,60 @@ function processOrderConfirmation(sheet, row, headers) {
 
 ### Stage3_PayLink.gs
 
+> ✅ 2026-05-08 更新：LINE 發送的付款連結改為短網址（`pay.html?orderId=xxx`），每次點擊都由 Cloudflare Function 產生新的 MerchantTradeNo，解決重複點擊導致付款失敗的問題。店家只需發送一次連結，客戶可以多次點擊。
+
 ```javascript
+/**
+ * Stage3_PayLink.gs
+ */
 function processPayLink(sheet, row, headers) {
   const rowData = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
   const order = {};
   headers.forEach((header, index) => { order[header] = rowData[index]; });
 
-  const userId = order['userId'] ? order['userId'].toString().trim() : '';
+  const userId = order['userId'] ? order['userId'].toString().trim() : "";
   if (!userId) {
-    console.log('Row ' + row + ' 沒有 userId，跳過');
+    console.log("Row " + row + " 沒有 userId，跳過");
     return;
   }
 
-  const submissionId = (order['SubmissionID'] || '').toString().replace(/[\s\r\n]+/g, '').substring(0, 8);
-  const timestamp = Utilities.formatDate(new Date(), 'GMT+8', 'MMddHHmm');
+  const submissionId = (order['SubmissionID'] || "").toString().replace(/[\s\r\n]+/g, '').substring(0, 8);
+  const timestamp = Utilities.formatDate(new Date(), "GMT+8", "MMddHHmm");
   const tradeNo = (submissionId + timestamp).substring(0, 20);
 
   const totalAmount = Number(order['付款金額']) || 0;
   if (totalAmount <= 0) {
-    console.log('Row ' + row + ' 付款金額為 0，跳過');
+    console.log("Row " + row + " 付款金額為 0，跳過");
     return;
   }
 
-  const payUrl = createEcPayLink(tradeNo, totalAmount, 'FlowerOrder', submissionId);
+  const itemName = 'FlowerOrder';
+  const payUrl = createEcPayLink(tradeNo, totalAmount, itemName, submissionId);
 
-  const payLinkIdx = headers.indexOf(CONFIG.PAY_LINK_COL_NAME.replace(/[\s\r\n]+/g, ''));
-  if (payLinkIdx !== -1) sheet.getRange(row, payLinkIdx + 1).setValue(payUrl);
+  // 寫回付款連結（完整連結，供後台查閱）
+  const payLinkColName = CONFIG.PAY_LINK_COL_NAME.replace(/[\s\r\n]+/g, '');
+  const payLinkIdx = headers.indexOf(payLinkColName);
+  if (payLinkIdx !== -1) {
+    sheet.getRange(row, payLinkIdx + 1).setValue(payUrl);
+  }
 
+  // 寫回付款單號
   const tradeNoIdx = headers.indexOf('付款單號');
-  if (tradeNoIdx !== -1) sheet.getRange(row, tradeNoIdx + 1).setValue(tradeNo);
+  if (tradeNoIdx !== -1) {
+    sheet.getRange(row, tradeNoIdx + 1).setValue(tradeNo);
+  }
 
   const customerName = order['訂購人姓名'] ? order['訂購人姓名'].toString().trim() : '您';
+
+  // ✅ 發給客戶的連結改為短網址，每次點擊都會產生新單號
+  const shortPayUrl = 'https://liff-redirect.pages.dev/pay.html?orderId=' + encodeURIComponent(submissionId);
 
   const payMsg = customerName + ' 您好 🌿\n'
     + '感謝您確認訂單！以下為您的付款連結，請協助於 3 天內完成付款\n'
     + '付款成功即代表訂單正式成立\n'
     + '\n'
     + '💳 付款金額：NT$ ' + totalAmount + '\n'
-    + '🔗 付款連結：' + payUrl + '\n'
+    + '🔗 付款連結：' + shortPayUrl + '\n'
     + '付款完成後您會於LINE收到通知訊息，\n'
     + '我們將立即為您安排花禮製作，\n'
     + '如有任何問題歡迎隨時與我們聯繫 🤍\n'
@@ -614,13 +349,24 @@ function processPayLink(sheet, row, headers) {
   sendLinePush(userId, payMsg);
 
   const stIdx = headers.indexOf(CONFIG.STATUS_COL_NAME.replace(/[\s\r\n]+/g, ''));
-  if (stIdx !== -1) sheet.getRange(row, stIdx + 1).setValue('3-已發送付款連結');
+  if (stIdx !== -1) {
+    sheet.getRange(row, stIdx + 1).setValue("3-已發送付款連結");
+  }
 
-  console.log('Stage3 成功發送付款連結：' + customerName);
+  console.log("Stage3 成功發送付款連結：" + customerName);
+}
+
+function testProcessPayLink() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_NAME);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
+    .map(h => h.toString().replace(/[\s\r\n]+/g, ''));
+  processPayLink(sheet, 2, headers);
 }
 ```
 
 ### EcPayUtils.gs
+
+> ℹ️ `createEcPayLink` 產生的長網址仍然寫入 Sheet AG 欄供後台查閱，但不再發給客戶。客戶收到的是短網址，由 Cloudflare Function 即時計算 CheckMacValue。
 
 ```javascript
 function createEcPayLink(tradeNo, totalAmount, itemName, submissionId) {
@@ -682,7 +428,15 @@ function testEcPayLink() {
 
 ### Stage4_PayNotify.gs
 
+> ✅ 2026-05-08 更新：
+> - `doPost` 改用 `CustomField1`（submissionId）查找訂單，不再依賴付款單號，解決重複點擊連結後單號被覆蓋導致找不到訂單的問題。
+> - `doGet` 新增 `mode=api` 回傳 JSON，供 Cloudflare Function 查詢金額使用。
+> - 付款成功才寫入實際成交的付款單號，Sheet 紀錄的永遠是真正付款成功的單號。
+
 ```javascript
+/**
+ * Stage4_PayNotify.gs
+ */
 function doPost(e) {
   try {
     const params = e.parameter;
@@ -705,27 +459,35 @@ function doPost(e) {
     const paymentDate = params['PaymentDate'] || '';
     const paymentType = params['PaymentType'] || '';
 
+    // ✅ 改用 CustomField1（submissionId）查找，不再依賴付款單號
+    const submissionId = params['CustomField1'] || '';
+    if (!submissionId) {
+      console.error('缺少 CustomField1（submissionId）');
+      return ContentService.createTextOutput('0|Error');
+    }
+
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_NAME);
     const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
       .map(h => h.toString().replace(/[\s\r\n]+/g, ''));
     const allData = sheet.getDataRange().getValues();
 
-    const tradeNoIdx = headers.indexOf('付款單號');
-    if (tradeNoIdx === -1) {
-      console.error('找不到付款單號欄位');
+    // ✅ 用 SubmissionID 欄位比對，不管單號怎麼變都能找到正確的列
+    const sidIdx = headers.indexOf('SubmissionID');
+    if (sidIdx === -1) {
+      console.error('找不到 SubmissionID 欄位');
       return ContentService.createTextOutput('0|Error');
     }
 
     let targetRow = -1;
     for (let i = 1; i < allData.length; i++) {
-      if (allData[i][tradeNoIdx] && allData[i][tradeNoIdx].toString().trim() === tradeNo) {
+      if (allData[i][sidIdx] && allData[i][sidIdx].toString().trim() === submissionId) {
         targetRow = i + 1;
         break;
       }
     }
 
     if (targetRow === -1) {
-      console.error('找不到對應訂單：' + tradeNo);
+      console.error('找不到對應訂單，submissionId：' + submissionId);
       return ContentService.createTextOutput('0|Error');
     }
 
@@ -736,9 +498,11 @@ function doPost(e) {
 
     const stIdx      = headers.indexOf(CONFIG.STATUS_COL_NAME.replace(/[\s\r\n]+/g, ''));
     const payDateIdx = headers.indexOf('付款日期');
+    const tradeNoIdx = headers.indexOf('付款單號');
 
     if (rtnCode === '1') {
-      // --- 寫入付款完成狀態與日期 ---
+      // ✅ 付款成功：寫入本次實際成交的單號
+      if (tradeNoIdx !== -1) sheet.getRange(targetRow, tradeNoIdx + 1).setValue(tradeNo);
       if (stIdx !== -1)      sheet.getRange(targetRow, stIdx + 1).setValue('4-付款完成');
       if (payDateIdx !== -1) sheet.getRange(targetRow, payDateIdx + 1).setValue(paymentDate);
 
@@ -760,9 +524,9 @@ function doPost(e) {
       createCalendarEvent(rowData, headers);
 
     } else {
-      // 付款失敗：僅更新狀態，不發 LINE（客戶從 result.html 自助重新付款）
+      // ✅ 付款失敗：只更新狀態，不動付款單號
       if (stIdx !== -1) sheet.getRange(targetRow, stIdx + 1).setValue('付款失敗');
-      console.log('付款失敗，訂單：' + tradeNo);
+      console.log('付款失敗，tradeNo：' + tradeNo + '，submissionId：' + submissionId);
     }
 
     return ContentService.createTextOutput('1|OK');
@@ -776,6 +540,7 @@ function doPost(e) {
 function doGet(e) {
   try {
     const submissionId = e.parameter['orderId'] || '';  // sid → orderId（sid 是 GAS 保留字）
+    const mode = e.parameter['mode'] || '';
 
     if (!submissionId) {
       return HtmlService.createHtmlOutput('<p>缺少訂單編號</p>')
@@ -813,8 +578,17 @@ function doGet(e) {
         .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
     }
 
+    // ✅ API mode：只回傳金額和 submissionId，給 Cloudflare Function 用
+    if (mode === 'api') {
+      return ContentService.createTextOutput(JSON.stringify({
+        totalAmount: totalAmount,
+        submissionId: submissionId
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+
     const timestamp = Utilities.formatDate(new Date(), 'GMT+8', 'MMddHHmm');
     const tradeNo = (submissionId.replace(/[\s\r\n]+/g, '').substring(0, 8) + timestamp).substring(0, 20);
+
     const payUrl = createEcPayLink(tradeNo, totalAmount, 'FlowerOrder', submissionId);
 
     const tradeNoIdx = sheetHeaders.indexOf('付款單號');
@@ -858,310 +632,28 @@ function doGet(e) {
 }
 
 function testDoGet() {
-  const e = { parameter: { orderId: 'jad749J' } };
+  const e = { parameter: { orderId: 'WOG0lYk' } };
   const result = doGet(e);
   console.log(result.getContent());
 }
-```
 
-### Stage5_Calendar.gs
-
-```javascript
-// =============================================
-// Stage5_Calendar.gs
-// =============================================
-
-// --- 時段解析（與 Stage 2 完全一致）---
-function parseTimeSlot(rawTime) {
-  if (rawTime instanceof Date) {
-    let hours   = rawTime.getHours();
-    let minutes = rawTime.getMinutes();
-    let startM  = minutes < 30 ? '00' : '30';
-    let endH    = minutes < 30 ? hours : hours + 1;
-    let endM    = minutes < 30 ? '30' : '00';
-    let startTotal = hours * 100 + parseInt(startM);
-    let endTotal   = endH * 100 + parseInt(endM);
-
-    let timeStr;
-    if (startTotal < 1100) {
-      timeStr = '11:00 - 11:30';
-    } else if (endTotal >= 2030) {
-      timeStr = '20:00 - 20:30';
-    } else {
-      timeStr = hours.toString().padStart(2, '0') + ':' + startM
-        + ' - '
-        + endH.toString().padStart(2, '0') + ':' + endM;
-    }
-
-    const [startPart, endPart] = timeStr.split(' - ');
-    const [sH, sM] = startPart.split(':').map(Number);
-    const [eH, eM] = endPart.split(':').map(Number);
-    return { startHour: sH, startMin: sM, endHour: eH, endMin: eM, timeStr };
-
-  } else {
-    return { startHour: 11, startMin: 0, endHour: 20, endMin: 30, timeStr: '11:00 - 20:30' };
-  }
-}
-
-// --- 標題組合 ---
-function buildEventTitle(order, isShipping) {
-  const customerName = (order['訂購人姓名'] || '客戶').toString();
-  const itemName     = (order['花禮名稱'] || order['花禮品項'] || '花禮').toString();
-  const shippingFee  = Number(order['配送運費']) || 0;
-  const suffix       = isShipping ? '｜配送 運費NT$' + shippingFee : '｜自取';
-  return '🌿 ' + customerName + '｜' + itemName + suffix;
-}
-
-// --- 活動描述組合 ---
-function buildEventDescription(order, isShipping, timeStr) {
-  const itemCount   = Number(order['花禮數量'])    || 1;
-  const cardTotal   = Number(order['卡片費'])       || 0;
-  const cardCount   = Number(order['加購卡片數量']) || 0;
-  const cardType    = (order['卡片類型'] || '').toString().trim();
-  const totalAmount = Number(order['付款金額'])     || 0;
-
-  const pickupDate = order['取花日期'] instanceof Date
-    ? Utilities.formatDate(order['取花日期'], 'GMT+8', 'yyyy-MM-dd')
-    : (order['取花日期'] || '');
-
-  const payDate = order['付款日期'] instanceof Date
-    ? Utilities.formatDate(order['付款日期'], 'GMT+8', 'yyyy-MM-dd')
-    : (order['付款日期'] || '');
-
-  const timeLabel = isShipping ? '運送花禮時段' : '自取花禮時段';
-
-  let desc = '【 訂購人資訊 】\n'
-    + '▪️ 姓名：' + (order['訂購人姓名'] || '未提供') + '\n'
-    + '▪️ 電話：' + (order['訂花人手機'] || '未提供') + '\n\n'
-    + '【 花禮明細 】\n'
-    + '▪️ 取花日期：' + pickupDate + '\n'
-    + '▪️ ' + timeLabel + '：' + timeStr + '\n'
-    + '▪️ 花禮品項：' + (order['花禮品項'] || '無') + '\n'
-    + '▪️ 花禮名稱：' + (order['花禮名稱'] || '依需求調整') + '\n'
-    + '▪️ 花禮數量：' + itemCount + '\n';
-
-  if (cardType) {
-    desc += '▪️ 加購卡片：' + cardType + '（NT$ ' + cardTotal + '）× ' + cardCount + '張\n';
-  }
-
-  if (isShipping) {
-    desc += '\n【 收件人資訊 】\n'
-      + '▪️ 收件人：'   + (order['收花人姓名']  || '同訂購人') + '\n'
-      + '▪️ 收件地址：' + (order['收花地址']    || '未提供')   + '\n'
-      + '▪️ 收件電話：' + (order['收花人電話']  || '未提供')   + '\n';
-  }
-
-  desc += '\n【 付款資訊 】\n'
-    + '▪️ 付款日期：' + payDate + '\n'
-    + '▪️ 付款單號：' + (order['付款單號'] || '') + '\n'
-    + '▪️ 付款金額：NT$ ' + totalAmount + '\n';
-
-  if ((order['訂單備註'] || '').toString().trim()) {
-    desc += '\n【 備註 】\n' + order['訂單備註'];
-  }
-
-  return desc;
-}
-
-// --- 建立 Calendar 活動（Stage 4 付款成功時呼叫）---
-function createCalendarEvent(rowData, headers) {
-  try {
-    const order = {};
-    headers.forEach((header, index) => { order[header] = rowData[index]; });
-
-    const rawDate    = order['取花日期'];
-    const pickupDate = rawDate instanceof Date ? rawDate : new Date(rawDate);
-    if (!pickupDate || isNaN(pickupDate.getTime())) {
-      console.log('Stage5 create：取花日期無效，跳過');
-      return;
-    }
-
-    const shippingMethod = (order['配送方式'] || '').toString();
-    const isShipping     = shippingMethod.includes('配送') || shippingMethod.includes('運送');
-    const rawTime        = isShipping ? order['運送-花禮抵達時段'] : order['自取-取花時段'];
-    const { startHour, startMin, endHour, endMin, timeStr } = parseTimeSlot(rawTime);
-
-    const startTime = new Date(pickupDate);
-    startTime.setHours(startHour, startMin, 0, 0);
-    const endTime = new Date(pickupDate);
-    endTime.setHours(endHour, endMin, 0, 0);
-
-    const title       = buildEventTitle(order, isShipping);
-    const description = buildEventDescription(order, isShipping, timeStr);
-
-    const calendar = CalendarApp.getDefaultCalendar();
-    const event    = calendar.createEvent(title, startTime, endTime, {
-      description: description
-    });
-
-    // 回寫 EventID 到 AE 欄
-    writeEventIdToSheet(order['SubmissionID'], headers, event.getId());
-
-    console.log('Stage5 活動建立：' + title + ' | ' + event.getId());
-
-  } catch (err) {
-    console.error('Stage5 createCalendarEvent 錯誤：' + err.message);
-  }
-}
-
-// --- 更新 Calendar 活動（已付款列指定欄位修改時呼叫）---
-function updateCalendarEvent(rowData, headers) {
-  try {
-    const order = {};
-    headers.forEach((header, index) => { order[header] = rowData[index]; });
-
-    const rawEventId = (order['CalendarEventID'] || '').toString().trim();
-    if (!rawEventId) {
-      console.log('Stage5 update：無 CalendarEventID，跳過');
-      return;
-    }
-
-    // 【已刪除】狀態不更新
-    if (rawEventId.startsWith('DELETE:')) {
-      console.log('Stage5 update：活動處於已刪除狀態，跳過');
-      return;
-    }
-
-    const rawDate    = order['取花日期'];
-    const pickupDate = rawDate instanceof Date ? rawDate : new Date(rawDate);
-    if (!pickupDate || isNaN(pickupDate.getTime())) {
-      console.log('Stage5 update：取花日期無效，跳過');
-      return;
-    }
-
-    const shippingMethod = (order['配送方式'] || '').toString();
-    const isShipping     = shippingMethod.includes('配送') || shippingMethod.includes('運送');
-    const rawTime        = isShipping ? order['運送-花禮抵達時段'] : order['自取-取花時段'];
-    const { startHour, startMin, endHour, endMin, timeStr } = parseTimeSlot(rawTime);
-
-    const newStart = new Date(pickupDate);
-    newStart.setHours(startHour, startMin, 0, 0);
-    const newEnd = new Date(pickupDate);
-    newEnd.setHours(endHour, endMin, 0, 0);
-
-    const title       = buildEventTitle(order, isShipping);
-    const description = buildEventDescription(order, isShipping, timeStr);
-
-    const event = CalendarApp.getDefaultCalendar().getEventById(rawEventId);
-    if (!event) {
-      console.log('Stage5 update：找不到 EventID ' + rawEventId);
-      return;
-    }
-
-    event.setTime(newStart, newEnd);
-    event.setTitle(title);
-    event.setDescription(description);
-    console.log('Stage5 活動已更新：' + title + ' | ' + rawEventId);
-
-  } catch (err) {
-    console.error('Stage5 updateCalendarEvent 錯誤：' + err.message);
-  }
-}
-
-// --- 軟刪除 Calendar 活動（標題加【已刪除】前綴 + 變灰色）---
-function softDeleteCalendarEvent(rowData, headers, row, sheet) {
-  try {
-    const order = {};
-    headers.forEach((header, index) => { order[header] = rowData[index]; });
-
-    const rawEventId = (order['CalendarEventID'] || '').toString().trim();
-    if (!rawEventId || rawEventId.startsWith('DELETE:')) {
-      console.log('Stage5 softDelete：無活動或已是刪除狀態，跳過');
-      return;
-    }
-
-    const event = CalendarApp.getDefaultCalendar().getEventById(rawEventId);
-    if (event) {
-      event.setTitle('【已刪除】' + event.getTitle());
-      event.setColor(CalendarApp.EventColor.GRAPHITE);
-    }
-
-    const deleteTimestamp = Utilities.formatDate(new Date(), 'GMT+8', 'yyyy-MM-dd');
-    const eventIdIdx = headers.indexOf('CalendarEventID');
-    if (eventIdIdx !== -1) {
-      sheet.getRange(row, eventIdIdx + 1).setValue('DELETE:' + deleteTimestamp + ':' + rawEventId);
-    }
-
-    console.log('Stage5 活動已軟刪除：' + rawEventId);
-
-  } catch (err) {
-    console.error('Stage5 softDeleteCalendarEvent 錯誤：' + err.message);
-  }
-}
-
-// --- 重建 Calendar 活動（救回誤刪 or 一般重建）---
-function rebuildCalendarEvent(rowData, headers, row, sheet) {
-  try {
-    const order = {};
-    headers.forEach((header, index) => { order[header] = rowData[index]; });
-
-    const rawEventId = (order['CalendarEventID'] || '').toString().trim();
-
-    if (rawEventId) {
-      const actualEventId = rawEventId.startsWith('DELETE:')
-        ? rawEventId.split(':').slice(2).join(':')
-        : rawEventId;
-
-      try {
-        const oldEvent = CalendarApp.getDefaultCalendar().getEventById(actualEventId);
-        if (oldEvent) oldEvent.deleteEvent();
-      } catch (err) {
-        console.error('Stage5 重建前刪除舊活動失敗：' + err.message);
-      }
-
-      const eventIdIdx = headers.indexOf('CalendarEventID');
-      if (eventIdIdx !== -1) sheet.getRange(row, eventIdIdx + 1).setValue('');
-    }
-
-    createCalendarEvent(rowData, headers);
-    console.log('Stage5 活動重建完成');
-
-  } catch (err) {
-    console.error('Stage5 rebuildCalendarEvent 錯誤：' + err.message);
-  }
-}
-
-// --- 回寫 EventID 到 Sheet ---
-function writeEventIdToSheet(submissionId, headers, eventId) {
-  const sheet    = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_NAME);
-  const allData  = sheet.getDataRange().getValues();
-  const sidIdx   = headers.indexOf('SubmissionID');
-  const eventIdIdx = headers.indexOf('CalendarEventID');
-  if (eventIdIdx === -1) {
-    console.log('Stage5：找不到 CalendarEventID 欄位，請確認 AE 欄標題');
-    return;
-  }
-  const targetSid = (submissionId || '').toString().trim();
-  for (let i = 1; i < allData.length; i++) {
-    if (allData[i][sidIdx] && allData[i][sidIdx].toString().trim() === targetSid) {
-      sheet.getRange(i + 1, eventIdIdx + 1).setValue(eventId);
-      return;
-    }
-  }
-}
-
-// --- 授權測試函式（首次使用時執行一次以完成 Calendar OAuth 授權）---
-function authorizeCalendar() {
-  const cal = CalendarApp.getDefaultCalendar();
-  console.log('Calendar 授權成功，名稱：' + cal.getName());
-}
-
-// --- 測試建立活動 ---
-function testCreateCalendarEvent() {
+function testDoPostLookup() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_NAME);
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
     .map(h => h.toString().replace(/[\s\r\n]+/g, ''));
   const allData = sheet.getDataRange().getValues();
-  const payDateIdx = headers.indexOf('付款日期');
+  const sidIdx = headers.indexOf('SubmissionID');
 
+  const submissionId = 'WOG0lYk';
+  let targetRow = -1;
   for (let i = 1; i < allData.length; i++) {
-    const payDate = (allData[i][payDateIdx] || '').toString().trim();
-    if (payDate) {
-      console.log('測試第 ' + (i + 1) + ' 列');
-      createCalendarEvent(allData[i], headers);
+    if (allData[i][sidIdx] && allData[i][sidIdx].toString().trim() === submissionId) {
+      targetRow = i + 1;
       break;
     }
   }
+  console.log('找到的列：' + targetRow);
+  console.log('找到的訂購人：' + allData[targetRow - 1][headers.indexOf('訂購人姓名')]);
 }
 ```
 
@@ -1171,15 +663,176 @@ function testCreateCalendarEvent() {
 
 ### pay.html
 
-GAS 與綠界之間的橋接頁，接收所有綠界參數，過濾掉 `orderId` 和 `sid` 後以 POST 方式提交給綠界。
+> ✅ 2026-05-08 更新：不再直接接收綠界參數。改為向同源的 `/api/get-pay-params` 取得最新的付款參數（含新的 MerchantTradeNo 和 CheckMacValue），再自動 POST 給綠界。每次進入都會產生全新的付款單號，解決重複點擊失敗的問題。
 
-> ⚠️ `orderId` 和 `sid` 必須過濾，否則綠界回傳 `Parameter Error. orderId Not In Spec`。
+```html
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>前往付款頁面...</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background: #faf9f7;
+      color: #555;
+    }
+    p { font-size: 16px; }
+    p.error { color: #e3836c; }
+  </style>
+</head>
+<body>
+  <p id="msg">正在前往付款頁面，請稍候…</p>
+  <script>
+    var msgEl = document.getElementById('msg');
+    var params = new URLSearchParams(window.location.search);
+    var orderId = params.get('orderId') || '';
 
-### success.html
+    if (!orderId) {
+      msgEl.className = 'error';
+      msgEl.textContent = '連結異常，請聯繫店家重新取得付款連結。';
+    } else {
+      fetch('/api/get-pay-params?orderId=' + encodeURIComponent(orderId))
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+          if (data.error) {
+            msgEl.className = 'error';
+            msgEl.textContent = '付款連結異常，請聯繫店家。（' + data.error + '）';
+            return;
+          }
+          var form = document.createElement('form');
+          form.method = 'POST';
+          form.action = data.ecpayUrl;
+          var exclude = ['ecpayUrl'];
+          Object.keys(data).forEach(function(key) {
+            if (exclude.includes(key)) return;
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = key;
+            input.value = data[key];
+            form.appendChild(input);
+          });
+          document.body.appendChild(form);
+          form.submit();
+        })
+        .catch(function() {
+          msgEl.className = 'error';
+          msgEl.textContent = '連結異常，請聯繫店家重新取得付款連結。';
+        });
+    }
+  </script>
+</body>
+</html>
+```
 
-付款成功時顯示，風格與 `result.html` 一致。顯示付款成功訊息，告知客戶數分鐘後 LINE 將收到通知。
+### functions/api/get-pay-params.js
 
-不接收任何 URL 參數，直接顯示固定內容。
+> ✅ 2026-05-08 新增：接收 `orderId`，向 GAS doGet（`mode=api`）查詢付款金額，產生新的 `MerchantTradeNo`，並用存放在 Cloudflare Secret 中的 `ECPAY_KEY` 和 `ECPAY_IV` 計算 `CheckMacValue`，回傳完整綠界參數給 `pay.html`。
+>
+> **Cloudflare Pages 設定需求**：
+> - Settings → Variables and Secrets → 新增 `ECPAY_KEY`（Secret 類型）
+> - Settings → Variables and Secrets → 新增 `ECPAY_IV`（Secret 類型）
+> - Settings → Runtime → Compatibility flags → 新增 `nodejs_compat`
+
+```javascript
+import { createHash } from 'node:crypto';
+
+function computeCheckMacValue(params, hashKey, hashIV) {
+  const sortedKeys = Object.keys(params).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  let queryString = sortedKeys.map(k => `${k}=${params[k]}`).join('&');
+  queryString = `HashKey=${hashKey}&${queryString}&HashIV=${hashIV}`;
+  queryString = encodeURIComponent(queryString)
+    .replace(/%20/g, '+')
+    .replace(/%21/g, '!')
+    .replace(/%28/g, '(')
+    .replace(/%29/g, ')')
+    .replace(/%2A/g, '*')
+    .replace(/%2D/g, '-')
+    .replace(/%2E/g, '.')
+    .replace(/%5F/g, '_');
+  queryString = queryString.toLowerCase();
+  return createHash('sha256').update(queryString).digest('hex').toUpperCase();
+}
+
+export async function onRequestGet(context) {
+  const url = new URL(context.request.url);
+  const orderId = url.searchParams.get('orderId');
+
+  if (!orderId) {
+    return new Response(JSON.stringify({ error: '缺少 orderId' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  const ECPAY_KEY = context.env.ECPAY_KEY;
+  const ECPAY_IV  = context.env.ECPAY_IV;
+
+  if (!ECPAY_KEY || !ECPAY_IV) {
+    return new Response(JSON.stringify({ error: '缺少金流設定' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  const GAS_URL = 'https://script.google.com/macros/s/AKfycbzb-IRbn6OoJJDHsv8lREJjZxC9ASfSJnIqjY_bK6pKKXc7kZcmnt1Ke4kD1T7p85GfoQ/exec';
+  let totalAmount;
+  try {
+    const gasRes = await fetch(`${GAS_URL}?orderId=${encodeURIComponent(orderId)}&mode=api`, {
+      redirect: 'follow'
+    });
+    const gasData = await gasRes.json();
+    totalAmount = gasData.totalAmount;
+    if (!totalAmount || totalAmount <= 0) throw new Error('金額異常');
+  } catch (err) {
+    return new Response(JSON.stringify({ error: '查詢訂單失敗：' + err.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const timestamp = `${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}`;
+  const tradeNo = (orderId.substring(0, 8) + timestamp).substring(0, 20);
+  const tradeDate = `${now.getFullYear()}/${pad(now.getMonth() + 1)}/${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+  const params = {
+    MerchantID:        '3492283',
+    MerchantTradeNo:   tradeNo,
+    MerchantTradeDate: tradeDate,
+    PaymentType:       'aio',
+    TotalAmount:       String(totalAmount),
+    TradeDesc:         'FlowerGift',
+    ItemName:          'FlowerOrder',
+    ReturnURL:         'https://script.google.com/macros/s/AKfycbzb-IRbn6OoJJDHsv8lREJjZxC9ASfSJnIqjY_bK6pKKXc7kZcmnt1Ke4kD1T7p85GfoQ/exec',
+    OrderResultURL:    'https://liff-redirect.pages.dev/payment-result',
+    ChoosePayment:     'ALL',
+    EncryptType:       '1',
+    IgnorePayment:     'CVS#BARCODE',
+    CustomField1:      orderId,
+  };
+
+  const checkMacValue = computeCheckMacValue(params, ECPAY_KEY, ECPAY_IV);
+
+  return new Response(JSON.stringify({
+    ...params,
+    CheckMacValue: checkMacValue,
+    ecpayUrl: 'https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5'
+  }), {
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*'
+    }
+  });
+}
+```
 
 ### result.html
 
@@ -1190,6 +843,12 @@ GAS 與綠界之間的橋接頁，接收所有綠界參數，過濾掉 `orderId`
 按鈕點擊後用 `window.location.href` 跳轉到 GAS doGet URL（帶 `orderId`），GAS 產生新連結後顯示中間頁，客戶再點一次進入綠界。
 
 > 因 GAS HtmlService iframe 沙盒限制，中間頁無法自動跳轉，客戶需手動點擊一次。
+
+### success.html
+
+付款成功時顯示，風格與 `result.html` 一致。顯示付款成功訊息，告知客戶數分鐘後 LINE 將收到通知。
+
+不接收任何 URL 參數，直接顯示固定內容。
 
 ### functions/payment-result.js
 
@@ -1205,12 +864,10 @@ export async function onRequestPost(context) {
   const rtnCode  = formData.get('RtnCode')       || '';
   const rtnMsg   = formData.get('RtnMsg')        || '';
 
-  // 付款成功 → 跳轉到成功頁
   if (rtnCode === '1') {
     return Response.redirect('https://liff-redirect.pages.dev/success.html', 302);
   }
 
-  // 付款失敗 → 跳轉到 result.html
   const params = new URLSearchParams();
   if (orderId)  params.set('orderId',  orderId);
   if (rtnCode)  params.set('RtnCode',  rtnCode);
@@ -1258,10 +915,10 @@ export async function onRequestPost(context) {
 | AA：狀態 | 訂單狀態 | GAS 自動寫入 |
 | AB：發送付款連結 | 填「發送」觸發 Stage3 | 店家手動 |
 | AC：付款日期 | 付款成功日期 | Stage4 自動寫入 |
-| AD：付款單號 | MerchantTradeNo | Stage3 / Stage4 doGet 寫入 |
+| AD：付款單號 | 實際成交的 MerchantTradeNo | Stage4 doPost 付款成功時寫入 |
 | AE：CalendarEventID | Google Calendar 活動 ID | Stage5 自動寫入 |
 | AF：刪除重建行事曆 | 填「刪除」或「重建」觸發對應動作 | 店家手動 |
-| AG：付款連結 | 完整付款連結 | Stage3 / Stage4 doGet 寫入 |
+| AG：付款連結 | 完整付款連結（供後台查閱，不發給客戶） | Stage3 / Stage4 doGet 寫入 |
 
 ---
 
@@ -1275,7 +932,8 @@ export async function onRequestPost(context) {
 已確認訂單
   ↓ AB 欄填「發送」→ Stage3
 3-已發送付款連結
-  ↓ 客戶付款成功 → 綠界 POST → Stage4 doPost → Stage5 建立 Calendar
+  ↓ 客戶點短網址 → pay.html → 取得新單號 → POST 給綠界 → 付款成功
+  → 綠界 POST → Stage4 doPost → Stage5 建立 Calendar
 4-付款完成
 
 或
@@ -1283,7 +941,7 @@ export async function onRequestPost(context) {
 3-已發送付款連結
   ↓ 客戶付款失敗 → 綠界 POST → Cloudflare payment-result.js → result.html
 付款失敗
-  ↓ 客戶點「重新付款」→ Stage4 doGet
+  ↓ 客戶點「重新付款」→ Stage4 doGet → 重新付款連結頁面 → 客戶點按鈕 → pay.html → 綠界
 3-已發送付款連結（新連結）
 ```
 
@@ -1374,6 +1032,7 @@ export async function onRequestPost(context) {
 ▪️ 自取/運送花禮時段：{時段}
 ▪️ 花禮品項 / 名稱 / 數量 / 金額
 ▪️ 加購卡片 / 金額
+▪️ 配送運費：NT$ {運費}（僅配送訂單顯示）
 ▪️ 應付總額：NT$ {總額}
 ▪️ 訂單備註：{備註}
 
@@ -1393,7 +1052,7 @@ export async function onRequestPost(context) {
 付款成功即代表訂單正式成立
 
 💳 付款金額：NT$ {金額}
-🔗 付款連結：{連結}
+🔗 付款連結：https://liff-redirect.pages.dev/pay.html?orderId={submissionId}
 ...（含安全支付聲明）
 ```
 
@@ -1417,17 +1076,29 @@ export async function onRequestPost(context) {
 ### GAS 更新流程
 
 1. 開啟「花藝訂單記錄表」→「擴充功能」→「Apps Script」
-2. 修改程式碼，按「儲存」
-3. 點右上角「部署」→「管理部署作業」
-4. 點選現有部署（**絕對不要新增**）→ 鉛筆圖示編輯
-5. 版本選「新版本」，填說明，按「部署」
-6. URL 保持不變
+2. 修改程式碼，按「儲存」（Ctrl+S）
+3. 若修改的是 `doGet` 或 `doPost`（Web App 入口）：
+   - 點右上角「部署」→「管理部署作業」
+   - 點選現有部署（**絕對不要新增**）→ 鉛筆圖示編輯
+   - 版本選「新版本」，填說明，按「部署」
+   - URL 保持不變
+4. 若修改的是 `onEditTrigger` 相關邏輯（Stage2、Stage3、Stage5）：
+   - 按 Ctrl+S 儲存即可，不需要重新部署
 
 ### Cloudflare Pages 更新流程
 
-1. 修改對應檔案（`result.html`、`pay.html`、`functions/payment-result.js` 等）
-2. 推送到 GitHub `main` branch
-3. 自動部署，約 1-2 分鐘完成
+1. 修改對應檔案，推送到 GitHub `main` branch
+2. 自動部署，約 1-2 分鐘完成
+3. 確認 Cloudflare Dashboard → Deployments 最新一筆 Status 為 Success
+
+### Cloudflare Pages 必要設定
+
+Settings → Variables and Secrets：
+- `ECPAY_KEY`（Secret 類型）= 綠界 HashKey
+- `ECPAY_IV`（Secret 類型）= 綠界 HashIV
+
+Settings → Runtime → Compatibility flags：
+- `nodejs_compat`（必須啟用，否則 `node:crypto` 無法使用）
 
 ---
 
@@ -1437,31 +1108,32 @@ export async function onRequestPost(context) {
 `sid` 是 GAS URL 參數保留字，使用會導致「找不到網頁」。本系統改用 `orderId`。
 
 ### 2. GAS HtmlService iframe 沙盒限制
-`HtmlService` 頁面被包在 iframe 中，瀏覽器沙盒阻止自動跳轉到外部網站（包括 `window.location.replace`、`window.top.location`、`setTimeout` 觸發的點擊）。解決方案：`<base target="_top">` + 手動點擊按鈕。
+`HtmlService` 頁面被包在 iframe 中，瀏覽器沙盒阻止所有形式的外部跳轉（包括 `window.location.replace`、`window.top.location`、`window.top.location.href`、`<a target="_top">`）。解決方案：改由 Cloudflare 的靜態頁面（`pay.html`）發起跳轉，完全繞開 GAS iframe 沙盒。
 
 ### 3. 綠界 CSP 限制
 綠界付款頁設定 `frame-ancestors: none`，不允許被 iframe 嵌入。
 
 ### 4. GAS 部署 URL 穩定性
-新增部署會產生新 URL。URL 改變需同步更新：`EcPayUtils.gs` 的 `ReturnURL`、`result.html` 的 `GAS_URL`、綠界後台的 `ReturnURL`。
+新增部署會產生新 URL。URL 改變需同步更新：`EcPayUtils.gs` 的 `ReturnURL`、`result.html` 的 `GAS_URL`、`functions/api/get-pay-params.js` 的 `GAS_URL`。
 
-### 5. pay.html 參數過濾
-必須過濾 `orderId` 和 `sid`，否則綠界回傳 `Parameter Error. orderId Not In Spec`。
+### 5. MerchantTradeNo 不可重複與新架構
+每次客戶點擊 `pay.html` 時，`/api/get-pay-params.js` 會用 `submissionId前8碼 + MMddHHmm` 即時產生新的 `MerchantTradeNo`，確保每次點擊都是全新的付款單號，完全解決重複點擊失敗的問題。
 
-### 6. CheckMacValue 計算
-排除 `CheckMacValue` 本身，參數按 key 字母順序排列，特殊 URL encoding 後 SHA-256 雜湊。
+### 6. doPost 改用 CustomField1 查找訂單
+原本 `doPost` 用 `MerchantTradeNo` 查找 Sheet 對應列。由於 `MerchantTradeNo` 每次點擊都會更新，舊單號付款後可能找不到訂單。改用永遠不變的 `CustomField1`（submissionId）查找，並在付款成功後才寫入實際成交的單號。
 
-### 7. userId 為空的影響
-客戶不是從 LINE 內的 LIFF 連結進入表單，Stage 1/2/3 推播全部失效。必須確保客戶只透過 LIFF 連結填表。
+### 7. CheckMacValue 計算
+在 GAS 端：排除 `CheckMacValue` 本身，參數按 key 字母順序排列，特殊 URL encoding 後 SHA-256 雜湊。
+在 Cloudflare Function 端：使用 `node:crypto` 的 `createHash('sha256')`，需啟用 `nodejs_compat` 相容性旗標。
 
-### 8. MerchantTradeNo 不可重複
-使用 `SubmissionID前8碼 + MMddHHmm` 時間戳組成，重新付款時自動產生新單號。
+### 8. Cloudflare Function server-to-server 呼叫 GAS
+Cloudflare Function 用 `fetch(GAS_URL, { redirect: 'follow' })` 可以成功呼叫 GAS doGet 並取得 JSON 回應，不受 CORS 限制（server-to-server）。GAS doGet 需在 `mode=api` 時回傳 JSON，而不是 HTML。
 
 ### 9. GAS HtmlService 手機畫面縮成 40%
 GAS 外層容器把 iframe 預設寬度設為 980px，再縮放塞進手機，導致內容縮小約 40%。直接寫在 HTML 字串裡的 `<meta viewport>` 標籤會被 GAS 忽略。解決方案：用 `.addMetaTag('viewport', 'width=device-width, initial-scale=1.0')` 方法加上 viewport 設定。
 
 ### 10. 綠界 OrderResultURL 需由程式碼動態設定
-綠界後台的「失敗頁面」欄位必須**留空**，改由 `EcPayUtils.gs` 的 `OrderResultURL` 參數動態帶入，並搭配 `CustomField1` 傳遞 `submissionId`。這樣 Cloudflare Function 才能把 POST 轉換成帶參數的 GET 跳轉。
+綠界後台的「失敗頁面」欄位必須**留空**，改由 `functions/api/get-pay-params.js` 的 `OrderResultURL` 參數動態帶入，並搭配 `CustomField1` 傳遞 `submissionId`。
 
 ### 11. GAS Calendar OAuth 必須手動觸發授權
 GAS Web App 執行時不會自動跳出授權視窗。新增 Calendar 功能後，必須在 GAS 編輯器手動執行一次 `authorizeCalendar()` 函式完成授權，後續 `doPost` 觸發才能正常使用 `CalendarApp`。
@@ -1470,17 +1142,22 @@ GAS Web App 執行時不會自動跳出授權視窗。新增 Calendar 功能後�
 綠界 `ChoosePayment` 不支援 `#` 連接多個付款方式（那是 `IgnorePayment` 的語法）。顯示全部付款方式用 `ALL`，排除特定方式用 `IgnorePayment: 'CVS#BARCODE'`。
 
 ### 13. CalendarApp.EventColor 名稱與 Google Calendar UI 不同
-GAS 的 EventColor 屬性名稱和 Google Calendar UI 顯示的顏色名稱不一致，例如「石墨灰（Graphite）」在 GAS 中要用 `GRAY`，「香蕉（Banana）」要用 `YELLOW`。完整對照見坑 12。
+GAS 的 EventColor 屬性名稱和 Google Calendar UI 顯示的顏色名稱不一致，例如「石墨灰（Graphite）」在 GAS 中要用 `GRAY`，「香蕉（Banana）」要用 `YELLOW`。
 
 ### 14. success.html 需放在 repo 根目錄
-`success.html` 必須放在 Cloudflare Pages repo 的**根目錄**，不能放在 `functions/` 資料夾，否則 `payment-result.js` 的 302 轉址會找不到頁面。
+`success.html` 必須放在 Cloudflare Pages repo 的**根目錄**，不能放在 `functions/` 資料夾。
+
+---
+
+## 常見問題排查
 
 | 問題 | 可能原因 | 解決方法 |
 |------|---------|---------|
 | Stage1 沒有自動發送 | 觸發器未建立 / userId 為空 | 確認時間觸發器存在；確認 D 欄有值 |
 | 填「發送」沒反應 | on-edit 觸發器未建立 | 確認安裝型 onEditTrigger 存在 |
 | GAS URL 顯示「找不到網頁」 | 使用了 `sid` 參數 / 多帳號登入 / 錯誤 URL | 改用 `orderId`；無痕視窗測試；確認使用穩定 URL |
-| 付款失敗顯示 `orderId Not In Spec` | pay.html 未過濾 orderId | 確認 EXCLUDE 陣列含 `'orderId'` |
+| pay.html 顯示連結異常 | /api/get-pay-params 回傳錯誤 | 確認 Cloudflare Secret 有設定 ECPAY_KEY 和 ECPAY_IV；確認 nodejs_compat 已啟用 |
+| pay.html 顯示查詢訂單失敗 | GAS doGet mode=api 回傳異常 | 確認 GAS 已重新部署且 doGet 有 mode=api 判斷 |
 | 付款成功但 LINE 無通知 | GAS 冷啟動延遲 | 8 分鐘內屬正常；超過則查執行記錄 |
 | 重新部署後功能異常 | 新增了新部署導致 URL 改變 | 使用「編輯現有部署」，不要新增 |
 | LINE 推播全部失效 | LINE_TOKEN 過期 | 重新產生 token 並更新 Script Properties |
@@ -1488,9 +1165,8 @@ GAS 的 EventColor 屬性名稱和 Google Calendar UI 顯示的顏色名稱不�
 | 付款失敗頁面白畫面 | 綠界用 POST 跳轉，靜態頁面讀不到參數 | 確認 functions/payment-result.js 有正確部署 |
 | Calendar 活動沒有建立 | GAS 未完成 Calendar OAuth 授權 | 在 GAS 編輯器執行 authorizeCalendar() 完成授權 |
 | Calendar 活動找不到 | 直接在 Calendar 手動刪除，AE 欄 EventID 殘留 | 清空 AE 欄後，AF 欄填「重建」 |
-| 付款成功跳到失敗頁面 | payment-result.js 未判斷 RtnCode | 確認 payment-result.js 有 `if (rtnCode === '1')` 判斷 |
-| Calendar 活動顏色沒有改變 | EventColor 名稱錯誤（GRAPHITE 不存在） | 石墨灰用 `GRAY`，香蕉黃用 `YELLOW` |
 | ATM 付款選項不顯示 | ChoosePayment 語法錯誤 | 確認使用 `ALL` + `IgnorePayment: 'CVS#BARCODE'` |
+| Cloudflare Function 部署失敗 | 未啟用 nodejs_compat | Settings → Runtime → Compatibility flags 加入 `nodejs_compat` |
 
 ---
 
@@ -1510,23 +1186,33 @@ GAS 的 EventColor 屬性名稱和 Google Calendar UI 顯示的顏色名稱不�
 
 ---
 
-### 坑 2：Cloudflare Function 打不通 GAS
+### 坑 2：Cloudflare Function fetch GAS 拿到空白 HTML 外殼
 
-**症狀**：`retry.js`（Cloudflare Pages Function）用 `fetch()` 呼叫 GAS URL，回傳的是 Google 的「找不到網頁」HTML 錯誤頁。
+**症狀**：`Cloudflare Function` 用 `fetch()` 呼叫 GAS doGet，確認可以打通（有收到回應），但回傳的是空白 HTML 外殼，無法取得任何有用內容。
 
-**根本原因**：GAS Web App 的請求流程是先回傳 302 redirect 到 `script.googleusercontent.com`，這個重新導向需要瀏覽器的 session/cookie 才能正常完成。Server-to-server 的請求沒有瀏覽器 session，Google 會直接拒絕。
+**嘗試過的方向**：原本以為 Cloudflare Function 根本打不通 GAS（因為 GAS 302 redirect 需要瀏覽器 session），但實測後發現 Cloudflare 的 `fetch({ redirect: 'follow' })` 可以成功 follow GAS 的 302，拿到回應。問題不在於打不通，而在於內容。
 
-**解法**：放棄 Cloudflare Function 作為中介，改讓 `result.html` 的按鈕直接用 `window.location.href` 跳轉到 GAS URL。
+**根本原因**：GAS HtmlService 回傳的是帶有 iframe 的 HTML 結構，Cloudflare Function 拿到的是外殼，iframe 內容因為跨域被清空，只剩一個空的 `<div>` 框。
+
+**解法**：讓 GAS doGet 在接收到 `mode=api` 參數時，改用 `ContentService.createTextOutput` 回傳純 JSON（`{ totalAmount, submissionId }`），Cloudflare Function 就能正確解析，不受 iframe 跨域限制影響。
 
 ---
 
-### 坑 3：GAS HtmlService 的 iframe 沙盒無法自動跳轉到綠界
+### 坑 3：GAS HtmlService 的 iframe 沙盒所有跳轉方式都失敗
 
-**症狀**：GAS `doGet` 用 `HtmlService` 回傳帶有 `window.location.replace(payUrl)` 的 HTML，瀏覽器顯示空白頁或 Google 的警告頁。
+**症狀**：GAS `doGet` 用 `HtmlService` 回傳帶有各種跳轉邏輯的 HTML，在 LINE 內建瀏覽器和電腦瀏覽器都無法跳轉到綠界。
 
-**根本原因**：GAS `HtmlService` 回傳的頁面被包在帶有嚴格沙盒屬性的 iframe 中，`allow-top-navigation-by-user-activation` 規定只有真實的用戶手勢才能觸發頂層導航。
+**嘗試過的所有方向（全部失敗）：**
+- `window.location.replace(payUrl)` → 白畫面
+- `window.location.href = payUrl` → 白畫面
+- `window.top.location.href = payUrl` → 被沙盒擋住
+- `<a href="..." target="_top">` → 被沙盒擋住
+- `<button onclick="window.top.location.href='...'">` → payUrl 含特殊字元（`%`、`&`）導致 JS 字串截斷，按鈕點了沒反應
+- `encodeURIComponent(payUrl)` 嵌入 onclick → 仍被沙盒擋住
 
-**解法**：用 `<base target="_top">` + `<a>` 標籤讓用戶手動點擊跳轉。
+**根本原因**：GAS `HtmlService` 回傳的頁面被包在帶有嚴格沙盒屬性的 iframe 中，`allow-top-navigation-by-user-activation` 規定只有真實的用戶手勢才能觸發頂層導航。而實測發現即使是真實點擊，在 LINE 內建瀏覽器和部分電腦瀏覽器中仍然被擋住。這不是特定瀏覽器的問題，是 GAS iframe 架構本身的根本限制。
+
+**解法**：完全放棄從 GAS 頁面跳轉到綠界。改由 Cloudflare 的靜態 `pay.html` 頁面（不在 GAS iframe 中）向同源的 `/api/get-pay-params` 取得付款參數，再直接 form POST 給綠界，整個流程不經過 GAS iframe，沙盒問題完全消失。
 
 ---
 
@@ -1534,9 +1220,9 @@ GAS 的 EventColor 屬性名稱和 Google Calendar UI 顯示的顏色名稱不�
 
 **症狀**：付款頁面顯示「交易失敗，訊息代碼：10100050，Parameter Error. orderId Not In Spec」。
 
-**根本原因**：`pay.html` 把 URL 上所有參數（包含自訂的 `orderId`）全部 POST 給綠界，而綠界不認識 `orderId`。
+**根本原因**：舊版 `pay.html` 把 URL 上所有參數（包含自訂的 `orderId`）全部 POST 給綠界，而綠界不認識 `orderId`。
 
-**解法**：在 `pay.html` 加入過濾邏輯，POST 給綠界前排除 `orderId` 和 `sid`。
+**解法**：新版 `pay.html` 改為向 `/api/get-pay-params` 取得精確的參數清單，只傳綠界認識的參數，完全避免這個問題。
 
 ---
 
@@ -1566,7 +1252,7 @@ GAS 的 EventColor 屬性名稱和 Google Calendar UI 顯示的顏色名稱不�
 
 **根本原因**：GAS 執行記錄有延遲，而且從瀏覽器觸發的 Web App 請求有時記錄會遺失。這是 GAS 平台本身的限制。
 
-**解法**：改用 GAS 編輯器直接執行測試函式，這樣執行記錄一定會出現且完整。
+**解法**：改用 GAS 編輯器直接執行測試函式，這樣執行記錄一定會出現且完整。付款後的 doPost 記錄可能延遲數分鐘才出現，屬正常現象。
 
 ---
 
@@ -1574,13 +1260,12 @@ GAS 的 EventColor 屬性名稱和 Google Calendar UI 顯示的顏色名稱不�
 
 **症狀**：付款失敗後，Safari 跳轉到 `result.html` 顯示白畫面，重新付款按鈕不出現。
 
-**根本原因**：綠界的 `OrderResultURL` 用 POST 方式傳遞付款結果，但 `result.html` 是靜態頁面，無法接收 POST body 的參數，導致 `orderId`、`RtnCode` 等資料讀不到。
+**根本原因**：綠界的 `OrderResultURL` 用 POST 方式傳遞付款結果，但 `result.html` 是靜態頁面，無法接收 POST body 的參數。
 
 **解法**：
 1. 在 Cloudflare Pages 新增 `functions/payment-result.js`，接收綠界 POST，解析 `CustomField1`（orderId）和錯誤代碼，再以 302 轉址到 `result.html?orderId=xxx&RtnCode=xxx`
-2. `EcPayUtils.gs` 的 `OrderResultURL` 改指向 `https://liff-redirect.pages.dev/payment-result`
-3. 綠界後台「失敗頁面」欄位留空（避免覆蓋程式碼設定）
-4. `CustomField1` 帶入 `submissionId`，讓 Function 不需要查 Sheet 就能取得 orderId
+2. `functions/api/get-pay-params.js` 的 `OrderResultURL` 指向 `https://liff-redirect.pages.dev/payment-result`
+3. 綠界後台「失敗頁面」欄位留空
 
 ---
 
@@ -1588,11 +1273,9 @@ GAS 的 EventColor 屬性名稱和 Google Calendar UI 顯示的顏色名稱不�
 
 **症狀**：新增 `Stage5_Calendar.gs` 並在 `appsscript.json` 加入 Calendar scope 後，執行測試函式仍顯示「The script does not have permission to perform that action」，且不跳出授權視窗。
 
-**嘗試過的方向**：加入 `oauthScopes`、新增 Calendar 服務、重新整理頁面，全部無效。
+**根本原因**：GAS Web App 執行時不會自動觸發授權視窗。必須在 GAS 編輯器直接執行一個最簡單的 Calendar 函式才能觸發授權流程。
 
-**根本原因**：GAS Web App 執行時不會自動觸發授權視窗。必須在 GAS 編輯器直接執行一個**最簡單的** Calendar 函式才能觸發授權流程。
-
-**解法**：在 `Stage5_Calendar.gs` 新增 `authorizeCalendar()` 函式並執行一次，彈出授權視窗後點「允許」完成授權：
+**解法**：在 `Stage5_Calendar.gs` 新增 `authorizeCalendar()` 函式並執行一次：
 ```javascript
 function authorizeCalendar() {
   const cal = CalendarApp.getDefaultCalendar();
@@ -1616,25 +1299,19 @@ function authorizeCalendar() {
 
 **症狀**：付款成功後，客戶看到的是付款失敗頁面（`result.html`），而不是綠界的成功頁面。
 
-**嘗試過的方向**：以為是綠界後台「成交頁面」欄位設定問題，但欄位是空的。
-
-**根本原因**：`OrderResultURL` 是客戶端跳轉參數，**不分付款成功或失敗都會觸發**，只要付款流程結束就會 POST 到這個網址。原本只用來處理失敗的 `payment-result.js` 沒有判斷 `RtnCode`，導致成功也跳到失敗頁。
+**根本原因**：`OrderResultURL` 是客戶端跳轉參數，**不分付款成功或失敗都會觸發**。
 
 **解法**：在 `payment-result.js` 加入 `RtnCode` 判斷：
 - `RtnCode === '1'` → 跳轉到 `success.html`
 - 其他 → 跳轉到 `result.html`
 
-同時新增 `success.html` 付款成功頁面，風格與 `result.html` 一致。
-
 ---
 
 ### 坑 12：CalendarApp.EventColor 顏色名稱與 Google Calendar UI 不同
 
-**症狀**：設定 `CalendarApp.EventColor.GRAPHITE` 後，活動顏色沒有改變，仍然是預設藍色。
+**症狀**：設定 `CalendarApp.EventColor.GRAPHITE` 後，活動顏色沒有改變。
 
-**根本原因**：GAS 的 EventColor 屬性名稱和 Google Calendar UI 顯示的名稱不同：
-- Google Calendar 顯示「石墨灰（Graphite）」→ GAS 用 `GRAY`（不是 `GRAPHITE`）
-- Google Calendar 顯示「香蕉（Banana）」→ GAS 用 `YELLOW`
+**根本原因**：GAS 的 EventColor 屬性名稱和 Google Calendar UI 顯示的名稱不同。
 
 **對照表：**
 
@@ -1653,15 +1330,67 @@ function authorizeCalendar() {
 
 ### 坑 13：onEditTrigger 改了程式碼但觸發器跑舊版
 
-**症狀**：`onEditTrigger` 明明有偵測 K 欄（運送-花禮抵達時段），但改了 K 欄後 Calendar 完全沒有更新，執行記錄也沒有出現 `onEditTrigger` 的紀錄。
+**症狀**：`onEditTrigger` 明明有偵測某欄，但改欄後 Calendar 完全沒有更新。
 
-**嘗試過的方向**：懷疑欄位名稱不符、觸發器設定錯誤，逐一確認都沒問題。
+**根本原因**：GAS 安裝型觸發器在程式碼修改後，如果沒有重新儲存讓觸發器重新載入，可能會繼續執行舊版本的程式碼。
 
-**根本原因**：GAS 安裝型觸發器（installable trigger）在程式碼修改後，如果沒有重新儲存讓觸發器重新載入，可能會繼續執行舊版本的程式碼，導致新加的邏輯不生效。
+**解法**：每次修改 `onEditTrigger` 相關邏輯後，務必確認有按下儲存（Ctrl+S），觸發器重新載入後問題自動解決。
 
-**解法**：在 `onEditTrigger` 最開頭加入 `console.log`，強制儲存一次檔案，觸發器重新載入後問題自動解決。
+---
 
-> ⚠️ 每次修改 `onEditTrigger` 相關邏輯後，務必確認有按下儲存（Ctrl+S），讓觸發器載入最新程式碼。
+### 坑 14：Cloudflare Function 使用 node:crypto 部署失敗
+
+**症狀**：推送 `functions/api/get-pay-params.js` 後，Cloudflare 部署失敗，錯誤訊息為 `Error: No such module "node:crypto"`。
+
+**根本原因**：Cloudflare Pages Function 預設不啟用 Node.js 相容模組，`node:crypto` 需要額外的相容性旗標。
+
+**解法**：Cloudflare Dashboard → Workers & Pages → `liff-redirect` → Settings → Runtime → Compatibility flags，加入 `nodejs_compat`。之後推送才能正常部署。
+
+---
+
+### 坑 15：Cloudflare pay.js 的 308 Permanent Redirect 殘留
+
+**症狀**：刪除 `functions/pay.js` 後，訪問 `pay.html?orderId=xxx` 仍然被 308 轉址，Network 顯示 `pay.html → 308 → pay → 302 → GAS`。
+
+**根本原因**：`pay.js` 曾對 `/pay` 路由設定 302，Cloudflare 邊緣節點快取為 308 Permanent Redirect，即使刪除檔案後仍然生效。
+
+**解法**：在 Cloudflare Dashboard 點「Retry」重新部署，強制刷新邊緣節點快取。若仍然無效，用帶不同 query string 的網址（如 `?nocache=1`）測試繞過快取。
+
+---
+
+### 坑 16：doPost 用付款單號查找訂單，重複點擊後找不到訂單
+
+**症狀**：客戶點了付款連結但沒有付款，之後重新付款成功，但 LINE 通知沒發、Sheet 狀態沒更新、Calendar 沒建立，GAS 執行記錄顯示「找不到對應訂單」。
+
+**根本原因**：原本 `doPost` 用 `MerchantTradeNo`（付款單號）查找 Sheet 對應列。但每次客戶重新進入 `pay.html` 時，`/api/get-pay-params` 都會產生新的 `MerchantTradeNo`，Sheet 的付款單號欄位被更新。當客戶用舊連結完成付款時，綠界回傳的是舊單號，但 Sheet 已存最新單號，比對失敗。
+
+**解法**：`doPost` 改用 `CustomField1`（submissionId，由 Tally 產生，永遠不變）查找訂單。付款成功後再把**實際成交的** `MerchantTradeNo` 寫回 Sheet，確保記錄的永遠是真正付款成功的單號。
+
+---
+
+### 坑 17：Stage2 選擇配送時 LINE 訊息沒有顯示運費
+
+**症狀**：客戶選擇配送時，LINE 訂單確認訊息的明細中沒有「配送運費」這一行，但應付總額已經包含運費，導致客戶看到總額卻不知道運費是多少。
+
+**根本原因**：`processOrderConfirmation` 中雖然有讀取 `shippingFee` 並加進 `totalAmount`，但 `confirmMsg` 的組裝邏輯從來沒有把「配送運費」這一行加進去。
+
+**解法**：在 `confirmMsg` 組裝時，在「加購金額」和「應付總額」之間加入：
+```javascript
++ (isShipping ? '▪️ 配送運費：NT$ ' + shippingFee + '\n' : '')
+```
+只有選擇配送的訂單才顯示這一行，自取訂單不顯示。
+
+---
+
+### 坑 18：GitHub 刪除檔案後忘記 Commit，導致長時間排查方向錯誤
+
+**症狀**：在 GitHub 網頁介面刪除 `functions/pay.js` 後，Cloudflare 沒有觸發新的部署，`/pay` 路由的 302 轉址持續生效，導致 `pay.html?orderId=xxx` 一直被導到 GAS doGet，排查方向繞了很大一圈。
+
+**根本原因**：GitHub 網頁介面刪除檔案後，畫面會顯示「This file was deleted」的 diff 預覽，但這只是**暫存狀態**，必須按右上角的「Commit changes...」才算真正提交到 `main` branch，Cloudflare 才會觸發重新部署。
+
+**解法**：刪除檔案後務必確認按下「Commit changes...」，並在 Cloudflare Dashboard 確認有新的部署記錄出現且 Status 為 Success。
+
+> ⚠️ GitHub 網頁介面操作特別容易忘記這個步驟，建議每次操作後都回 Cloudflare 確認部署狀態。
 
 ---
 
