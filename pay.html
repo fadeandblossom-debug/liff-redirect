@@ -16,28 +16,48 @@
       color: #555;
     }
     p { font-size: 16px; }
+    p.error { color: #e3836c; }
   </style>
 </head>
 <body>
-  <p>正在前往付款頁面，請稍候…</p>
-  <form id="ecpayForm" method="POST"
-        action="https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5">
-  </form>
+  <p id="msg">正在前往付款頁面，請稍候…</p>
   <script>
-    (function () {
-      const EXCLUDE = ['orderId', 'sid'];
-      const params = new URLSearchParams(window.location.search);
-      const form = document.getElementById('ecpayForm');
-      params.forEach(function (value, key) {
-        if (EXCLUDE.indexOf(key) !== -1) return;
-        const input = document.createElement('input');
-        input.type  = 'hidden';
-        input.name  = key;
-        input.value = value;
-        form.appendChild(input);
-      });
-      form.submit();
-    })();
+    var msgEl = document.getElementById('msg');
+    var params = new URLSearchParams(window.location.search);
+    var orderId = params.get('orderId') || '';
+
+    if (!orderId) {
+      msgEl.className = 'error';
+      msgEl.textContent = '連結異常，請聯繫店家重新取得付款連結。';
+    } else {
+      fetch('/api/get-pay-params?orderId=' + encodeURIComponent(orderId))
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+          if (data.error) {
+            msgEl.className = 'error';
+            msgEl.textContent = '付款連結異常，請聯繫店家。（' + data.error + '）';
+            return;
+          }
+          var form = document.createElement('form');
+          form.method = 'POST';
+          form.action = data.ecpayUrl;
+          var exclude = ['ecpayUrl'];
+          Object.keys(data).forEach(function(key) {
+            if (exclude.includes(key)) return;
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = key;
+            input.value = data[key];
+            form.appendChild(input);
+          });
+          document.body.appendChild(form);
+          form.submit();
+        })
+        .catch(function() {
+          msgEl.className = 'error';
+          msgEl.textContent = '連結異常，請聯繫店家重新取得付款連結。';
+        });
+    }
   </script>
 </body>
 </html>
