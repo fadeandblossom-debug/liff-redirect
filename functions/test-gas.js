@@ -11,5 +11,6 @@ export async function onRequestGet(context) {
     });
   } catch (err) {
     return new Response('Error: ' + err.message, { status: 500 });
+    
   }
 }
